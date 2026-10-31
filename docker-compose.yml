@@ -1,0 +1,23 @@
+services:
+  musicbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify-music-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Optional: uncomment if you mount cookies.txt for YouTube bot bypass
+      # - ./cookies.txt:/app/cookies.txt:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
