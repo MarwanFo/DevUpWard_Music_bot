@@ -1,7 +1,7 @@
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import discord
 import yt_dlp
@@ -22,7 +22,7 @@ YTDL_OPTIONS: Dict[str, Any] = {
     "logtostderr": False,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytmsearch",  # Search YouTube Music first for cleaner audio
+    "default_search": "ytsearch",
     "source_address": "0.0.0.0",   # Bind to IPv4 to mitigate IPv6 throttling
 }
 
@@ -53,7 +53,6 @@ class AudioSourceService:
     """
 
     def __init__(self):
-        # Check if optional cookies.txt exists in the workspace
         opts = YTDL_OPTIONS.copy()
         if os.path.exists("cookies.txt"):
             opts["cookiefile"] = "cookies.txt"
@@ -61,13 +60,45 @@ class AudioSourceService:
 
         self._ytdl = yt_dlp.YoutubeDL(opts)
 
+    @staticmethod
+    def _extract_stream_data(raw_info: Dict[str, Any]) -> Optional[Tuple[str, str, str, int]]:
+        """Extracts direct stream URL, webpage URL, title, and duration from raw info."""
+        if not raw_info:
+            return None
+
+        entry = raw_info
+        if "entries" in raw_info:
+            entries = raw_info.get("entries")
+            if not entries:
+                return None
+            entry = entries[0]
+
+        stream_url = entry.get("url")
+        if not stream_url and "formats" in entry:
+            # Fallback to last available audio format
+            audio_formats = [f for f in entry.get("formats", []) if f.get("acodec") != "none"]
+            if audio_formats:
+                stream_url = audio_formats[-1].get("url")
+            elif entry.get("formats"):
+                stream_url = entry["formats"][-1].get("url")
+
+        if not stream_url:
+            return None
+
+        webpage_url = entry.get("webpage_url") or entry.get("url") or ""
+        title = entry.get("title", "Unknown Title")
+        duration = int(entry.get("duration", 0))
+
+        return stream_url, webpage_url, title, duration
+
     async def resolve_stream(self, search_query_or_url: str) -> Optional[ResolvedAudio]:
         """
-        Extracts the direct streaming audio URL for a given query or video URL.
-        First checks SQLite cache for instant lookup (<5ms); on cache miss, executes yt-dlp.
-        Dispatched via asyncio.to_thread to keep the event loop non-blocking.
+        Extracts direct streaming audio URL for a given query or URL.
+        1. Checks SQLite cache.
+        2. Tries YouTube (ytsearch1:).
+        3. Falls back to SoundCloud (scsearch1:) if YouTube fails.
         """
-        # 1. Check Cache
+        # 1. Check SQLite Cache
         try:
             from services.database import database_service
             cached = await database_service.get_cached_stream(search_query_or_url)
@@ -76,54 +107,59 @@ class AudioSourceService:
         except Exception as e:
             logger.debug(f"Cache lookup bypassed: {e}")
 
-        # 2. Extract via yt-dlp
+        loop = asyncio.get_running_loop()
+
+        # Format target query
+        query = search_query_or_url.strip()
+        is_direct_url = query.startswith("http://") or query.startswith("https://")
+        primary_target = query if is_direct_url else f"ytsearch1:{query}"
+
+        # 2. Extract from primary source (YouTube)
+        raw_info = None
         try:
-            loop = asyncio.get_running_loop()
-            info = await loop.run_in_executor(
+            raw_info = await loop.run_in_executor(
                 None,
-                lambda: self._ytdl.extract_info(search_query_or_url, download=False)
+                lambda: self._ytdl.extract_info(primary_target, download=False)
             )
+        except Exception as yt_err:
+            logger.warning(f"YouTube resolution failed for '{query}': {yt_err}")
 
-            if not info:
-                logger.warning(f"No audio stream found for query: '{search_query_or_url}'")
-                return None
-
-            # If search returned multiple entries, pick the first match
-            if "entries" in info:
-                entries = info.get("entries")
-                if not entries:
-                    logger.warning(f"Search entries empty for: '{search_query_or_url}'")
-                    return None
-                info = entries[0]
-
-            stream_url = info.get("url")
-            if not stream_url:
-                logger.error(f"Failed to extract direct stream URL for '{search_query_or_url}'")
-                return None
-
-            resolved = ResolvedAudio(
-                stream_url=stream_url,
-                webpage_url=info.get("webpage_url", search_query_or_url),
-                title=info.get("title", "Unknown Title"),
-                duration_seconds=int(info.get("duration", 0))
-            )
-
-            # 3. Store in cache
+        # 3. Fallback to SoundCloud if YouTube returned nothing or failed
+        if not raw_info and not is_direct_url:
+            fallback_target = f"scsearch1:{query}"
+            logger.info(f"Attempting SoundCloud fallback for '{query}'...")
             try:
-                from services.database import database_service
-                await database_service.cache_stream(search_query_or_url, resolved)
-            except Exception as e:
-                logger.debug(f"Cache write error: {e}")
+                raw_info = await loop.run_in_executor(
+                    None,
+                    lambda: self._ytdl.extract_info(fallback_target, download=False)
+                )
+            except Exception as sc_err:
+                logger.error(f"SoundCloud fallback also failed for '{query}': {sc_err}")
 
-            return resolved
-        except Exception as e:
-            logger.error(f"yt-dlp stream resolution error for '{search_query_or_url}': {e}")
+        extracted = self._extract_stream_data(raw_info) if raw_info else None
+        if not extracted:
+            logger.error(f"Could not resolve any audio stream for: '{search_query_or_url}'")
             return None
 
+        stream_url, webpage_url, title, duration = extracted
+        resolved = ResolvedAudio(
+            stream_url=stream_url,
+            webpage_url=webpage_url,
+            title=title,
+            duration_seconds=duration
+        )
+
+        # 4. Save to cache
+        try:
+            from services.database import database_service
+            await database_service.cache_stream(search_query_or_url, resolved)
+        except Exception as e:
+            logger.debug(f"Cache write error: {e}")
+
+        return resolved
+
     def create_audio_source(self, stream_url: str, volume: float = 0.5) -> discord.PCMVolumeTransformer:
-        """
-        Constructs a discord.PCMVolumeTransformer wrapping FFmpegPCMAudio.
-        """
+        """Constructs a discord.PCMVolumeTransformer wrapping FFmpegPCMAudio."""
         ffmpeg_source = discord.FFmpegPCMAudio(
             stream_url,
             executable=settings.FFMPEG_PATH,
