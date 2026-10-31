@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -56,6 +56,35 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
     )
+
+    @field_validator("DEV_GUILD_ID", mode="before")
+    @classmethod
+    def clean_dev_guild_id(cls, v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError("DEV_GUILD_ID must be a valid integer or left blank.")
+        return int(v)
+
+    @field_validator("DEFAULT_VOLUME", mode="before")
+    @classmethod
+    def clean_default_volume(cls, v: Any) -> int:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return 50
+        return int(v)
+
+    @field_validator("IDLE_TIMEOUT_SECONDS", mode="before")
+    @classmethod
+    def clean_idle_timeout(cls, v: Any) -> int:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return 300
+        return int(v)
 
     @field_validator("DISCORD_BOT_TOKEN", "SPOTIPY_CLIENT_ID", "SPOTIPY_CLIENT_SECRET", mode="before")
     @classmethod
