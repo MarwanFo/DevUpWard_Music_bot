@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple
 
@@ -11,7 +12,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger("AudioSource")
 
-# yt-dlp configuration optimized for minimal latency and high-quality audio streaming
+# yt-dlp configuration optimized for minimal latency, high-quality audio streaming,
+# and bypassing YouTube bot-detection on cloud/VPS IP addresses.
 YTDL_OPTIONS: Dict[str, Any] = {
     "format": "bestaudio/best",
     "extract_flat": False,
@@ -24,6 +26,12 @@ YTDL_OPTIONS: Dict[str, Any] = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",   # Bind to IPv4 to mitigate IPv6 throttling
+    "extractor_args": {
+        "youtube": {
+            # Use mobile (Android/iOS) and TV player clients first to bypass web 'Sign in to confirm you are not a bot'
+            "player_client": ["android", "ios", "tv", "mweb", "web"],
+        }
+    },
 }
 
 # FFmpeg network reconnect and buffering arguments
@@ -61,6 +69,15 @@ class AudioSourceService:
         self._ytdl = yt_dlp.YoutubeDL(opts)
 
     @staticmethod
+    def _clean_soundcloud_query(query: str) -> str:
+        """Strips tags like (feat. ...), official audio, etc. to optimize SoundCloud search."""
+        clean = re.sub(r"(?i)[\(\[][^\)\]]*(?:feat|ft)[^\)\]]*[\)\]]", "", query)
+        clean = re.sub(r"(?i)\b(official\s+(audio|video|visualizer)|lyrics|video\s+clip|hd|4k)\b", "", clean)
+        clean = re.sub(r"[\(\)\[\]\-]", " ", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean or query
+
+    @staticmethod
     def _extract_stream_data(raw_info: Dict[str, Any]) -> Optional[Tuple[str, str, str, int]]:
         """Extracts direct stream URL, webpage URL, title, and duration from raw info."""
         if not raw_info:
@@ -95,8 +112,8 @@ class AudioSourceService:
         """
         Extracts direct streaming audio URL for a given query or URL.
         1. Checks SQLite cache.
-        2. Tries YouTube (ytsearch1:).
-        3. Falls back to SoundCloud (scsearch1:) if YouTube fails.
+        2. Tries YouTube (ytsearch1:) with mobile/android player client.
+        3. Falls back to SoundCloud (scsearch1:) with cleaned keywords if YouTube fails.
         """
         # 1. Check SQLite Cache
         try:
@@ -124,19 +141,23 @@ class AudioSourceService:
         except Exception as yt_err:
             logger.warning(f"YouTube resolution failed for '{query}': {yt_err}")
 
-        # 3. Fallback to SoundCloud if YouTube returned nothing or failed
-        if not raw_info and not is_direct_url:
-            fallback_target = f"scsearch1:{query}"
-            logger.info(f"Attempting SoundCloud fallback for '{query}'...")
+        # Check if YouTube gave a valid playable stream
+        extracted = self._extract_stream_data(raw_info) if raw_info else None
+
+        # 3. Fallback to SoundCloud if YouTube returned nothing, threw error, or has no stream URL
+        if not extracted and not is_direct_url:
+            sc_query = self._clean_soundcloud_query(query)
+            fallback_target = f"scsearch1:{sc_query}"
+            logger.info(f"Attempting SoundCloud fallback for '{sc_query}'...")
             try:
-                raw_info = await loop.run_in_executor(
+                sc_raw_info = await loop.run_in_executor(
                     None,
                     lambda: self._ytdl.extract_info(fallback_target, download=False)
                 )
+                extracted = self._extract_stream_data(sc_raw_info)
             except Exception as sc_err:
-                logger.error(f"SoundCloud fallback also failed for '{query}': {sc_err}")
+                logger.error(f"SoundCloud fallback also failed for '{sc_query}': {sc_err}")
 
-        extracted = self._extract_stream_data(raw_info) if raw_info else None
         if not extracted:
             logger.error(f"Could not resolve any audio stream for: '{search_query_or_url}'")
             return None

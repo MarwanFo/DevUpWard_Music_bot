@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 
 import spotipy
+from spotipy.cache_handler import MemoryCacheHandler
 from spotipy.oauth2 import SpotifyClientCredentials
 from spotipy.exceptions import SpotifyException
 
@@ -79,7 +80,8 @@ class SpotifyClient:
             try:
                 self._auth_manager = SpotifyClientCredentials(
                     client_id=self.client_id,
-                    client_secret=self.client_secret
+                    client_secret=self.client_secret,
+                    cache_handler=MemoryCacheHandler()
                 )
                 self._sp = spotipy.Spotify(
                     auth_manager=self._auth_manager,
