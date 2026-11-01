@@ -268,6 +268,16 @@ class GuildPlayer:
             def after_playing(error):
                 if error:
                     logger.error(f"[Guild {self.guild_id}] Playback error: {error}")
+                    # Invalidate cache entry so broken or expired URLs are immediately purged
+                    try:
+                        from services.database import database_service
+                        asyncio.run_coroutine_threadsafe(
+                            database_service.delete_cached_stream(search_query),
+                            self.bot.loop
+                        )
+                    except Exception as clean_err:
+                        logger.debug(f"Failed to invalidate cache after playback error: {clean_err}")
+
                 # Signal the event loop that audio has finished
                 self.bot.loop.call_soon_threadsafe(self.next_event.set)
 

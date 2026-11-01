@@ -34,14 +34,13 @@ YTDL_OPTIONS: Dict[str, Any] = {
     },
 }
 
-# FFmpeg network reconnect and buffering arguments
-FFMPEG_BEFORE_OPTIONS = (
-    "-reconnect 1 "
-    "-reconnect_streamed 1 "
-    "-reconnect_delay_max 5 "
-    "-nostdin"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
 )
 
+# Base FFmpeg arguments
 FFMPEG_OPTIONS = "-vn -b:a 128k"
 
 
@@ -180,11 +179,22 @@ class AudioSourceService:
         return resolved
 
     def create_audio_source(self, stream_url: str, volume: float = 0.5) -> discord.PCMVolumeTransformer:
-        """Constructs a discord.PCMVolumeTransformer wrapping FFmpegPCMAudio."""
+        """Constructs a discord.PCMVolumeTransformer wrapping FFmpegPCMAudio with headers to avoid CDN 403 Forbidden."""
+        referer = "https://soundcloud.com/" if "soundcloud" in stream_url.lower() else "https://www.google.com/"
+
+        before_options = (
+            "-reconnect 1 "
+            "-reconnect_streamed 1 "
+            "-reconnect_delay_max 5 "
+            "-nostdin "
+            f'-user_agent "{BROWSER_USER_AGENT}" '
+            f'-headers "Referer: {referer}\r\n"'
+        )
+
         ffmpeg_source = discord.FFmpegPCMAudio(
             stream_url,
             executable=settings.FFMPEG_PATH,
-            before_options=FFMPEG_BEFORE_OPTIONS,
+            before_options=before_options,
             options=FFMPEG_OPTIONS
         )
         return discord.PCMVolumeTransformer(ffmpeg_source, volume=volume)

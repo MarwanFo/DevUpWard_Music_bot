@@ -41,6 +41,12 @@ class DatabaseService:
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_stream_cache_exp ON stream_cache (expires_at)")
 
+            # Purge expired entries and stale signed URLs from previous sessions
+            await db.execute(
+                "DELETE FROM stream_cache WHERE expires_at <= ? OR stream_url LIKE '%soundcloud%'",
+                (time.time(),)
+            )
+
             # Guild Settings Table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS guild_settings (
@@ -87,13 +93,32 @@ class DatabaseService:
 
         return None
 
-    async def cache_stream(self, query: str, audio: ResolvedAudio, ttl_seconds: int = 21600):
+    async def delete_cached_stream(self, query: str):
+        """Deletes a cached stream entry if playback failed or URL expired."""
+        if not self._initialized:
+            await self.initialize()
+
+        query_hash = self._hash_query(query)
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("DELETE FROM stream_cache WHERE query_hash = ?", (query_hash,))
+                await db.commit()
+                logger.debug(f"Removed stream cache entry for query: '{query}'")
+        except Exception as e:
+            logger.error(f"Error deleting cached stream: {e}")
+
+    async def cache_stream(self, query: str, audio: ResolvedAudio, ttl_seconds: int = 14400):
         """
         Stores resolved stream URL in cache.
-        Default TTL: 6 hours (21600s), respecting YouTube stream token expiration.
+        YouTube TTL: 4 hours (14400s).
+        SoundCloud signed URLs expire rapidly: 10 minutes (600s).
         """
         if not self._initialized:
             await self.initialize()
+
+        # SoundCloud CloudFront signed URLs expire in 15-20 min; use short TTL
+        if "soundcloud" in audio.stream_url.lower():
+            ttl_seconds = 600
 
         query_hash = self._hash_query(query)
         expires_at = time.time() + ttl_seconds
