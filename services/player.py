@@ -213,6 +213,7 @@ class GuildPlayer:
     async def _player_loop(self):
         """Core background loop dispatching audio playback."""
         await self.bot.wait_until_ready()
+        consecutive_failures = 0
 
         while True:
             self.next_event.clear()
@@ -251,10 +252,19 @@ class GuildPlayer:
 
             resolved = await audio_source_service.resolve_stream(search_query)
             if not resolved:
+                consecutive_failures += 1
                 if self.text_channel:
                     await self.text_channel.send(
                         f"⚠️ Could not resolve audio for **{next_item.track.artist} - {next_item.track.title}**. Skipping..."
                     )
+                self.current = None
+                # If too many consecutive resolutions fail, stop queue to prevent CPU burn on free hosts
+                if consecutive_failures >= 3:
+                    if self.text_channel:
+                        await self.text_channel.send("🛑 Stopped queue: multiple tracks failed to resolve. Check your connection or search terms.")
+                    self.queue.clear()
+                    consecutive_failures = 0
+                await asyncio.sleep(1.0)
                 continue
 
             # Check voice connection before playing
@@ -281,6 +291,7 @@ class GuildPlayer:
                 # Signal the event loop that audio has finished
                 self.bot.loop.call_soon_threadsafe(self.next_event.set)
 
+            start_time = time.time()
             self.voice_client.play(audio_source, after=after_playing)
 
             # Dispatch notification
@@ -289,6 +300,23 @@ class GuildPlayer:
 
             # Wait until current track completes, skips, or stops
             await self.next_event.wait()
+
+            # Measure playback duration to protect against high-CPU rapid failure loops
+            play_duration = time.time() - start_time
+            if play_duration >= 4.0:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if self.loop_mode == LoopMode.TRACK:
+                    # Break loop mode if track crashed immediately to prevent CPU loop
+                    self.current = None
+
+                if consecutive_failures >= 3:
+                    if self.text_channel:
+                        await self.text_channel.send("🛑 Playback halted: repeated immediate audio errors. Pausing to protect server CPU.")
+                    self.queue.clear()
+                    consecutive_failures = 0
+                await asyncio.sleep(1.0)
 
     async def _send_now_playing(self, item: QueueItem):
         """Sends a Now Playing notification embed to the text channel."""

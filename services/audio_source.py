@@ -28,8 +28,8 @@ YTDL_OPTIONS: Dict[str, Any] = {
     "source_address": "0.0.0.0",   # Bind to IPv4 to mitigate IPv6 throttling
     "extractor_args": {
         "youtube": {
-            # Use mobile (Android/iOS) and TV player clients first to bypass web 'Sign in to confirm you are not a bot'
-            "player_client": ["android", "ios", "tv", "mweb", "web"],
+            # Use lean mobile clients to minimize CPU & RAM on shared hosts and bypass bot checks
+            "player_client": ["android", "ios"],
         }
     },
 }
@@ -40,8 +40,8 @@ BROWSER_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Base FFmpeg arguments
-FFMPEG_OPTIONS = "-vn -b:a 128k"
+# FFmpeg encoding arguments: '-threads 1' prevents CPU spikes on shared hosting
+FFMPEG_OPTIONS = "-vn -b:a 128k -threads 1 -nostdin"
 
 
 @dataclass
