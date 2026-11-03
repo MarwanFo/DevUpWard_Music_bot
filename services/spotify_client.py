@@ -1,7 +1,11 @@
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Callable
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 import spotipy
 from spotipy.cache_handler import MemoryCacheHandler
@@ -60,6 +64,26 @@ class SpotifyCollection:
     tracks: List[SpotifyTrack] = field(default_factory=list)
 
 
+def create_robust_session() -> requests.Session:
+    """
+    Creates an HTTP session with automatic reconnection and exponential backoff
+    to prevent RemoteDisconnected / ConnectionReset drops on long-running bot instances.
+    """
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=4,
+        connect=3,
+        read=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 class SpotifyClient:
     """
     Asynchronous wrapper around the official Spotify Web API.
@@ -75,7 +99,7 @@ class SpotifyClient:
         self._initialize_client()
 
     def _initialize_client(self):
-        """Initializes the Spotipy client with credentials if provided."""
+        """Initializes the Spotipy client with credentials and resilient session."""
         if self.client_id and self.client_secret:
             try:
                 self._auth_manager = SpotifyClientCredentials(
@@ -83,9 +107,11 @@ class SpotifyClient:
                     client_secret=self.client_secret,
                     cache_handler=MemoryCacheHandler()
                 )
+                session = create_robust_session()
                 self._sp = spotipy.Spotify(
                     auth_manager=self._auth_manager,
-                    requests_timeout=10,
+                    requests_session=session,
+                    requests_timeout=15,
                     retries=3
                 )
                 logger.info("Spotify API client initialized successfully.")
@@ -94,6 +120,24 @@ class SpotifyClient:
                 self._sp = None
         else:
             logger.warning("Spotify credentials missing. Spotify client is in unauthenticated mode.")
+
+    async def _safe_call(self, func: Callable, *args, **kwargs) -> Any:
+        """
+        Executes a Spotipy function call in a thread pool executor with automatic
+        reconnection and session recovery if the server closed the connection.
+        """
+        for attempt in range(1, 4):
+            try:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as conn_err:
+                logger.warning(f"Spotify connection drop on attempt {attempt}/3: {conn_err}. Reconnecting...")
+                if attempt == 3:
+                    raise
+                # Re-create session to obtain fresh TCP/TLS sockets
+                self._initialize_client()
+                await asyncio.sleep(0.5 * attempt)
+            except Exception:
+                raise
 
     @property
     def is_authenticated(self) -> bool:
@@ -150,7 +194,7 @@ class SpotifyClient:
         clean_id = parsed[1] if parsed else track_id
 
         try:
-            data = await asyncio.to_thread(self._sp.track, clean_id)
+            data = await self._safe_call(self._sp.track, clean_id)
             return self._parse_track_payload(data)
         except SpotifyException as e:
             logger.error(f"Spotify error fetching track '{clean_id}': {e}")
@@ -168,24 +212,26 @@ class SpotifyClient:
         clean_id = parsed[1] if parsed else album_id
 
         try:
-            album_info = await asyncio.to_thread(self._sp.album, clean_id)
+            album_info = await self._safe_call(self._sp.album, clean_id)
             album_name = album_info.get("name", "Unknown Album")
             artists = [a.get("name") for a in album_info.get("artists", [])]
             cover_url = album_info.get("images", [{}])[0].get("url") if album_info.get("images") else None
             album_url = album_info.get("external_urls", {}).get("spotify", "")
 
-            # Paginate through all album tracks
             tracks: List[SpotifyTrack] = []
             results = album_info.get("tracks", {})
 
             while results:
                 for item in results.get("items", []):
-                    # Album track objects omit full album payload, inject album metadata
                     item["album"] = {"name": album_name, "images": album_info.get("images", [])}
                     tracks.append(self._parse_track_payload(item))
 
                 if results.get("next"):
-                    results = await asyncio.to_thread(self._sp.next, results)
+                    try:
+                        results = await self._safe_call(self._sp.next, results)
+                    except Exception as next_err:
+                        logger.warning(f"Could not load next album page: {next_err}")
+                        break
                 else:
                     break
 
@@ -204,7 +250,7 @@ class SpotifyClient:
             return None
 
     async def get_playlist(self, playlist_id: str) -> Optional[SpotifyCollection]:
-        """Fetches all tracks from a public or unlisted Spotify playlist."""
+        """Fetches tracks from a public or unlisted Spotify playlist with safe pagination."""
         if not self._sp:
             raise RuntimeError("Spotify client is not initialized.")
 
@@ -212,11 +258,8 @@ class SpotifyClient:
         clean_id = parsed[1] if parsed else playlist_id
 
         try:
-            playlist_info = await asyncio.to_thread(
-                self._sp.playlist,
-                clean_id,
-                fields="id,name,owner.display_name,images,external_urls,tracks.total,tracks.items,tracks.next"
-            )
+            # Query playlist without restrictive fields to avoid breaking the /tracks pagination endpoint
+            playlist_info = await self._safe_call(self._sp.playlist, clean_id)
             title = playlist_info.get("name", "Unknown Playlist")
             owner = playlist_info.get("owner", {}).get("display_name", "Unknown Curator")
             cover_url = playlist_info.get("images", [{}])[0].get("url") if playlist_info.get("images") else None
@@ -224,16 +267,23 @@ class SpotifyClient:
 
             tracks: List[SpotifyTrack] = []
             results = playlist_info.get("tracks", {})
+            max_tracks = 250  # Cap at 250 tracks to keep queue responsive and avoid Discord timeouts
 
-            while results:
+            while results and len(tracks) < max_tracks:
                 for item in results.get("items", []):
                     track_data = item.get("track")
-                    # Ignore episodes/podcasts or unavailable local files
+                    # Ignore null entries, podcasts, or unavailable local files
                     if track_data and track_data.get("id"):
                         tracks.append(self._parse_track_payload(track_data))
+                    if len(tracks) >= max_tracks:
+                        break
 
-                if results.get("next"):
-                    results = await asyncio.to_thread(self._sp.next, results)
+                if len(tracks) < max_tracks and results.get("next"):
+                    try:
+                        results = await self._safe_call(self._sp.next, results)
+                    except Exception as next_err:
+                        logger.warning(f"Could not fetch next playlist page: {next_err}")
+                        break
                 else:
                     break
 
@@ -257,7 +307,7 @@ class SpotifyClient:
             raise RuntimeError("Spotify client is not initialized.")
 
         try:
-            results = await asyncio.to_thread(
+            results = await self._safe_call(
                 self._sp.search,
                 q=query,
                 limit=limit,
@@ -272,4 +322,3 @@ class SpotifyClient:
 
 # Global singleton instance
 spotify_client = SpotifyClient()
-
