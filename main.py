@@ -21,11 +21,13 @@ async def start_health_server(bot: commands.Bot, port: int = 8080) -> web.AppRun
 
     async def health_check(request: web.Request) -> web.Response:
         ready = bot.is_ready()
+        has_token = bool(settings.DISCORD_BOT_TOKEN)
         data = {
-            "status": "healthy" if ready else "initializing",
+            "status": "healthy" if ready else ("waiting_for_token" if not has_token else "connecting"),
             "bot": str(bot.user) if ready else None,
             "guilds": len(bot.guilds) if ready else 0,
             "latency_ms": round(bot.latency * 1000) if ready else None,
+            "configured": has_token
         }
         return web.json_response(data, status=200)
 
@@ -103,23 +105,10 @@ class MusicBot(commands.Bot):
 
 
 async def main():
-    # 1. Validate environment configuration
-    config_warnings = settings.validate_production_readiness()
-    if config_warnings:
-        logger.warning("================ CONFIGURATION WARNING ================")
-        for warning in config_warnings:
-            logger.warning(f"-> {warning}")
-        logger.warning("Please configure your .env file with valid credentials.")
-        logger.warning("=======================================================")
-
-        if not settings.DISCORD_BOT_TOKEN:
-            logger.critical("Cannot start bot without a valid DISCORD_BOT_TOKEN. Exiting.")
-            sys.exit(1)
-
-    # 2. Instantiate and launch the bot
+    # 1. Instantiate the bot
     bot = MusicBot()
 
-    # 3. Start lightweight health-check server (useful for Fly.io / health monitors)
+    # 2. Start lightweight health-check server IMMEDIATELY so Fly.io / deployment probes succeed
     port = int(os.environ.get("PORT", "8080"))
     health_runner = None
     try:
@@ -127,7 +116,22 @@ async def main():
     except Exception as e:
         logger.warning(f"Health-check web server could not be started: {e}")
 
-    # Graceful shutdown handling
+    # 3. Validate environment configuration
+    config_warnings = settings.validate_production_readiness()
+    if config_warnings:
+        logger.warning("================ CONFIGURATION WARNING ================")
+        for warning in config_warnings:
+            logger.warning(f"-> {warning}")
+        logger.warning("Please configure your environment variables in Fly.io secrets.")
+        logger.warning("=======================================================")
+
+        if not settings.DISCORD_BOT_TOKEN:
+            logger.critical("DISCORD_BOT_TOKEN is not set. Container will remain alive on port 8080 so you can configure secrets in Fly.io.")
+            # Keep container running to prevent CrashLoopBackOff and allow setting secrets in dashboard
+            while not settings.DISCORD_BOT_TOKEN:
+                await asyncio.sleep(5)
+
+    # 4. Graceful shutdown handling
     loop = asyncio.get_running_loop()
 
     def handle_shutdown_signal():
@@ -138,9 +142,9 @@ async def main():
         try:
             loop.add_signal_handler(sig, handle_shutdown_signal)
         except NotImplementedError:
-            # Signal handlers are not fully supported on some Windows event loops
             pass
 
+    # 5. Launch bot
     try:
         async with bot:
             await bot.start(settings.DISCORD_BOT_TOKEN)
