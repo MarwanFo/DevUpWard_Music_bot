@@ -1,6 +1,7 @@
-# ==============================================================================
-# Fly.io configuration for DevUpWard Music Bot
-# ==============================================================================
+# fly.toml app configuration file generated for devupward-music-bot on 2026-11-04T00:49:19Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
 app = 'devupward-music-bot'
 primary_region = 'ams'
@@ -9,12 +10,11 @@ primary_region = 'ams'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '8080'
-  LOG_LEVEL = 'INFO'
   DEFAULT_VOLUME = '50'
   IDLE_TIMEOUT_SECONDS = '300'
+  LOG_LEVEL = 'INFO'
+  PORT = '8080'
 
-# Crucial for Discord Bots: auto_stop_machines = 'off' so Fly never puts the bot to sleep!
 [http_service]
   internal_port = 8080
   force_https = true
@@ -24,10 +24,11 @@ primary_region = 'ams'
 
   [http_service.concurrency]
     type = 'requests'
-    soft_limit = 200
     hard_limit = 250
+    soft_limit = 200
 
 [[vm]]
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory = '512mb'
+  memory_mb = 512
