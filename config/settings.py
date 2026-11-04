@@ -50,6 +50,10 @@ class Settings(BaseSettings):
         ge=30,
         description="Seconds of inactivity before the bot leaves the voice channel (default 5 min)"
     )
+    YTDL_COOKIES: Optional[str] = Field(
+        default=None,
+        description="Optional base64 or plaintext cookies.txt content to bypass YouTube bot detection on cloud servers"
+    )
 
     # Logging
     LOG_LEVEL: str = Field(

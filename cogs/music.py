@@ -63,6 +63,24 @@ class MusicCog(commands.Cog, name="Music"):
         voice_channel = interaction.user.voice.channel
         player = self._get_player(guild.id)
 
+        # Check permissions in the voice channel
+        bot_member = guild.me
+        perms = voice_channel.permissions_for(bot_member)
+        if not perms.connect:
+            await interaction.followup.send(f"❌ I do not have permission to **Connect** to {voice_channel.mention}!")
+            return
+        if not perms.speak:
+            await interaction.followup.send(
+                f"⚠️ I do not have permission to **Speak** in {voice_channel.mention}!\n"
+                "Please make sure my role or channel permissions have **Speak** enabled so you can hear audio."
+            )
+            return
+        if bot_member.voice and bot_member.voice.mute:
+            await interaction.followup.send(
+                "⚠️ I am currently **Server Muted** in this server! An admin needs to right-click me and uncheck **Server Mute**."
+            )
+            return
+
         # 2. Connect to voice channel if not already connected
         try:
             await player.connect(voice_channel, text_channel=interaction.channel)
@@ -293,6 +311,59 @@ class MusicCog(commands.Cog, name="Music"):
                 f"❌ Invalid queue position. Must be between 1 and {len(player.queue)}.",
                 ephemeral=True
             )
+
+    @app_commands.command(name="debug_voice", description="Check voice channel permissions, latency, and audio connection health.")
+    async def debug_voice(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        bot_member = guild.me
+        user_voice = interaction.user.voice
+
+        embed = discord.Embed(
+            title="🛠️ Voice Diagnostics & Health",
+            color=discord.Color.blue()
+        )
+
+        vc = guild.voice_client
+        if vc and vc.channel:
+            perms = vc.channel.permissions_for(bot_member)
+            embed.add_field(
+                name="Voice Connection",
+                value=(
+                    f"**Channel:** {vc.channel.name}\n"
+                    f"**Connected:** {'✅ Yes' if vc.is_connected() else '❌ No'}\n"
+                    f"**Playing Audio:** {'🔊 Yes' if vc.is_playing() else '⏸️ Paused' if vc.is_paused() else '⏹️ Idle'}\n"
+                    f"**Latency:** {round(vc.latency * 1000, 1)}ms\n"
+                    f"**Encryption Mode:** `{getattr(vc, 'mode', 'unknown')}`"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Bot Permissions & State",
+                value=(
+                    f"**Connect:** {'✅ Granted' if perms.connect else '❌ MISSING'}\n"
+                    f"**Speak:** {'✅ Granted' if perms.speak else '❌ MISSING (Audio cannot be heard!)'}\n"
+                    f"**Server Muted:** {'⚠️ YES (Unmute the bot!)' if bot_member.voice and bot_member.voice.mute else '✅ No'}\n"
+                    f"**Server Deafened:** {'⚠️ Yes' if bot_member.voice and bot_member.voice.deaf else 'No'}"
+                ),
+                inline=False
+            )
+        else:
+            embed.add_field(name="Voice Connection", value="Bot is not currently in any voice channel.", inline=False)
+
+        if user_voice and user_voice.channel:
+            embed.add_field(
+                name="Your Voice State",
+                value=(
+                    f"**Channel:** {user_voice.channel.name}\n"
+                    f"**Deafened:** {'⚠️ Yes (You cannot hear audio)' if user_voice.self_deaf or user_voice.deaf else 'No'}\n"
+                    f"**Muted:** {'Yes' if user_voice.self_mute or user_voice.mute else 'No'}"
+                ),
+                inline=False
+            )
+
+        embed.set_footer(text="DevUpWard Music • Tip: Right-click the bot in voice to ensure 'User Volume' is > 0%")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):

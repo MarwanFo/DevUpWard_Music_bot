@@ -82,7 +82,7 @@ class GuildPlayer:
             if self.voice_client.channel.id != channel.id:
                 await self.voice_client.move_to(channel)
         else:
-            self.voice_client = await channel.connect(reconnect=True, timeout=20.0, self_deaf=True)
+            self.voice_client = await channel.connect(reconnect=True, timeout=20.0, self_deaf=False)
 
         # Start the player loop task if not active
         if not self.player_task or self.player_task.done():
@@ -274,10 +274,13 @@ class GuildPlayer:
 
             # Create audio source and play
             audio_source = audio_source_service.create_audio_source(resolved.stream_url, volume=self.volume)
+            track_name = f"{next_item.track.artist} - {next_item.track.title}"
+            logger.info(f"[Guild {self.guild_id}] Starting playback: '{track_name}' (Volume: {int(self.volume * 100)}%)")
 
             def after_playing(error):
+                play_dur = time.time() - start_time
                 if error:
-                    logger.error(f"[Guild {self.guild_id}] Playback error: {error}")
+                    logger.error(f"[Guild {self.guild_id}] Playback error for '{track_name}' after {play_dur:.1f}s: {error}")
                     # Invalidate cache entry so broken or expired URLs are immediately purged
                     try:
                         from services.database import database_service
@@ -287,6 +290,14 @@ class GuildPlayer:
                         )
                     except Exception as clean_err:
                         logger.debug(f"Failed to invalidate cache after playback error: {clean_err}")
+                else:
+                    if play_dur < 3.0:
+                        logger.warning(
+                            f"[Guild {self.guild_id}] Audio for '{track_name}' ended after only {play_dur:.1f}s. "
+                            "Stream URL may be empty or unplayable."
+                        )
+                    else:
+                        logger.info(f"[Guild {self.guild_id}] Playback completed normally for '{track_name}' ({play_dur:.1f}s).")
 
                 # Signal the event loop that audio has finished
                 self.bot.loop.call_soon_threadsafe(self.next_event.set)

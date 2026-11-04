@@ -10,13 +10,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system dependencies: FFmpeg, libopus, and SSL certificates
+# Install system dependencies: FFmpeg, libopus, nodejs (JS challenge solver for yt-dlp), and SSL certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libopus0 \
     libopus-dev \
     libsodium-dev \
     ca-certificates \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python requirements

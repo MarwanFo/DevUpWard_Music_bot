@@ -28,8 +28,8 @@ YTDL_OPTIONS: Dict[str, Any] = {
     "source_address": "0.0.0.0",   # Bind to IPv4 to mitigate IPv6 throttling
     "extractor_args": {
         "youtube": {
-            # Use lean mobile clients to minimize CPU & RAM on shared hosts and bypass bot checks
-            "player_client": ["android", "ios"],
+            # 'tv' client reliably bypasses datacenter bot detection without requiring PO tokens
+            "player_client": ["tv", "android", "web", "mweb"],
         }
     },
 }
@@ -60,6 +60,23 @@ class AudioSourceService:
     """
 
     def __init__(self):
+        # Auto-create cookies.txt from environment variable if provided (e.g. Fly secrets)
+        if settings.YTDL_COOKIES and not os.path.exists("cookies.txt"):
+            try:
+                import base64
+                cookie_content = settings.YTDL_COOKIES.strip()
+                try:
+                    decoded = base64.b64decode(cookie_content).decode("utf-8")
+                    if "# Netscape HTTP Cookie File" in decoded or "\t" in decoded:
+                        cookie_content = decoded
+                except Exception:
+                    pass
+                with open("cookies.txt", "w", encoding="utf-8") as f:
+                    f.write(cookie_content)
+                logger.info("Created cookies.txt from YTDL_COOKIES environment variable.")
+            except Exception as e:
+                logger.warning(f"Failed writing cookies.txt from YTDL_COOKIES: {e}")
+
         opts = YTDL_OPTIONS.copy()
         if os.path.exists("cookies.txt"):
             opts["cookiefile"] = "cookies.txt"
@@ -180,7 +197,7 @@ class AudioSourceService:
 
     def create_audio_source(self, stream_url: str, volume: float = 0.5) -> discord.PCMVolumeTransformer:
         """Constructs a discord.PCMVolumeTransformer wrapping FFmpegPCMAudio with headers to avoid CDN 403 Forbidden."""
-        referer = "https://soundcloud.com/" if "soundcloud" in stream_url.lower() else "https://www.google.com/"
+        referer = "https://soundcloud.com/" if "soundcloud" in stream_url.lower() else "https://www.youtube.com/"
 
         before_options = (
             "-reconnect 1 "
@@ -195,7 +212,7 @@ class AudioSourceService:
             stream_url,
             executable=settings.FFMPEG_PATH,
             before_options=before_options,
-            options=FFMPEG_OPTIONS
+            options="-vn -threads 1 -nostdin"
         )
         return discord.PCMVolumeTransformer(ffmpeg_source, volume=volume)
 
