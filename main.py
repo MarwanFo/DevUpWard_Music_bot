@@ -4,11 +4,40 @@ import signal
 import sys
 import discord
 from discord.ext import commands
+from aiohttp import web
 
 from config.settings import settings
 from utils.logger import setup_logger
 
 logger = setup_logger("MusicBot", level=settings.LOG_LEVEL)
+
+
+async def start_health_server(bot: commands.Bot, port: int = 8080) -> web.AppRunner:
+    """
+    Lightweight HTTP health-check server for platforms like Fly.io.
+    Responds with JSON status and prevents Fly from marking the container unhealthy.
+    """
+    app = web.Application()
+
+    async def health_check(request: web.Request) -> web.Response:
+        ready = bot.is_ready()
+        data = {
+            "status": "healthy" if ready else "initializing",
+            "bot": str(bot.user) if ready else None,
+            "guilds": len(bot.guilds) if ready else 0,
+            "latency_ms": round(bot.latency * 1000) if ready else None,
+        }
+        return web.json_response(data, status=200)
+
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health-check web server listening on http://0.0.0.0:{port}")
+    return runner
 
 
 class MusicBot(commands.Bot):
@@ -90,6 +119,14 @@ async def main():
     # 2. Instantiate and launch the bot
     bot = MusicBot()
 
+    # 3. Start lightweight health-check server (useful for Fly.io / health monitors)
+    port = int(os.environ.get("PORT", "8080"))
+    health_runner = None
+    try:
+        health_runner = await start_health_server(bot, port)
+    except Exception as e:
+        logger.warning(f"Health-check web server could not be started: {e}")
+
     # Graceful shutdown handling
     loop = asyncio.get_running_loop()
 
@@ -104,8 +141,12 @@ async def main():
             # Signal handlers are not fully supported on some Windows event loops
             pass
 
-    async with bot:
-        await bot.start(settings.DISCORD_BOT_TOKEN)
+    try:
+        async with bot:
+            await bot.start(settings.DISCORD_BOT_TOKEN)
+    finally:
+        if health_runner:
+            await health_runner.cleanup()
 
 
 if __name__ == "__main__":

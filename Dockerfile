@@ -33,5 +33,7 @@ USER botuser
 
 VOLUME ["/app/data", "/app/logs"]
 
+EXPOSE 8080
+
 CMD ["python", "main.py"]
 

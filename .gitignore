@@ -1,6 +1,7 @@
 # Environment variables & secrets
 .env
 cookies.txt
+.cache
 
 # Python virtual environment
 .venv/
