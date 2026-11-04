@@ -82,7 +82,7 @@ class GuildPlayer:
             if self.voice_client.channel.id != channel.id:
                 await self.voice_client.move_to(channel)
         else:
-            self.voice_client = await channel.connect(reconnect=True, timeout=20.0)
+            self.voice_client = await channel.connect(reconnect=True, timeout=20.0, self_deaf=True)
 
         # Start the player loop task if not active
         if not self.player_task or self.player_task.done():
